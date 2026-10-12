@@ -1,0 +1,110 @@
+name: Source branch
+
+# Reusable: only release/X.Y.Z and hotfix/X.Y.Z may reach main.
+# - PR to main: checks the source branch (and comments on the PR when it fails, unless comment is false).
+# - Push to main: checks that the commit comes from a merged release/hotfix PR, so the merge commit
+#   carries the check (CapyForge requires the main checks on the merge commit of a final release).
+# - Push to release/* or hotfix/*: checks the branch name (malformed names create no Candidate).
+# - Anything else: the job is skipped.
+# The caller grants the permissions: contents: read, plus pull-requests: write to comment.
+
+on:
+  workflow_call:
+    inputs:
+      comment:
+        description: Comment on the PR explaining a failure.
+        type: boolean
+        default: true
+
+jobs:
+  check:
+    name: check
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/hotfix/')))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the source branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          pattern='^(release|hotfix)/[0-9]+\.[0-9]+\.[0-9]+$'
+
+          if [[ "$EVENT" == "pull_request" ]]; then
+            if [[ "$HEAD_REF" =~ $pattern ]]; then
+              echo "Source branch $HEAD_REF may be merged into main."
+              exit 0
+            fi
+            echo "::error::Only release/X.Y.Z and hotfix/X.Y.Z may be merged into main (got $HEAD_REF). Open this PR against develop."
+            exit 1
+          fi
+
+          if [[ "$REF_NAME" != "main" ]]; then
+            if [[ "$REF_NAME" =~ $pattern ]]; then
+              echo "Branch name $REF_NAME is valid."
+              exit 0
+            fi
+            echo "::error::Branch $REF_NAME does not match release/X.Y.Z or hotfix/X.Y.Z (three numbers); CapyForge ignores it. Rename it, e.g. release/1.4.0."
+            exit 1
+          fi
+
+          sources=""
+          for _ in 1 2 3; do
+            sources=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+              --jq '.[] | select(.merged_at != null and .base.ref == "main") | .head.ref')
+            [[ -n "$sources" ]] && break
+            sleep 10
+          done
+          for source in $sources; do
+            if [[ "$source" =~ $pattern ]]; then
+              echo "Commit $SHA comes from $source."
+              exit 0
+            fi
+          done
+          echo "::error::Commit $SHA on main does not come from a merged release/X.Y.Z or hotfix/X.Y.Z PR (found: ${sources:-none})."
+          exit 1
+
+      # Explains the failure on the PR, once per PR.
+      - name: Comment on the PR
+        if: failure() && github.event_name == 'pull_request' && inputs.comment
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- capyforge:source-branch -->'
+
+          existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id")
+          if [[ -n "$existing" ]]; then
+            echo "Explanation already posted on PR #$PR_NUMBER."
+            exit 0
+          fi
+
+          if [[ "$HEAD_REF" =~ ^(release|hotfix)/ ]]; then
+            advice="O nome da branch não segue o padrão: a versão precisa ter exatamente três números, como \`release/1.4.0\` ou \`hotfix/1.4.1\`.
+
+          Para seguir:
+          1. Crie a branch com o nome correto a partir desta (por exemplo, \`git switch -c release/1.4.0 && git push -u origin release/1.4.0\`).
+          2. Abra um novo PR dela para a \`main\` e feche este."
+          else
+            advice="A \`main\` só recebe versões. Mudanças do dia a dia entram pela \`develop\`.
+
+          Para seguir:
+          1. Mude a branch de destino deste PR para \`develop\` (**Edit**, ao lado do título) ou feche este PR e abra outro para a \`develop\`.
+          2. Quando quiser publicar uma versão, crie \`release/X.Y.Z\` a partir da \`develop\` (ou \`hotfix/X.Y.Z\` para correções urgentes) e abra o PR dela para a \`main\`."
+          fi
+
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$marker
+          **Este PR não pode entrar na \`main\`.**
+
+          A \`main\` só aceita PRs vindos de \`release/X.Y.Z\` ou \`hotfix/X.Y.Z\`, e a branch deste PR é \`$HEAD_REF\`. Por isso o check de origem da branch falhou e o build não rodou.
+
+          $advice"

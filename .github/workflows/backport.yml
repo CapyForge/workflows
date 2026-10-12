@@ -1,0 +1,82 @@
+name: Backport
+
+# Reusable, called on pull_request closed into main. After release/X.Y.Z or hotfix/X.Y.Z is merged,
+# opens a PR from backport/X.Y.Z to develop and approves its CI runs, which GitHub holds as
+# action_required for PRs opened by GitHub Actions.
+# Requires "Allow GitHub Actions to create and approve pull requests" in the repository settings.
+# The caller grants contents: write, pull-requests: write and actions: write.
+
+on:
+  workflow_call:
+
+jobs:
+  backport:
+    name: backport
+    if: github.event.pull_request.merged && (startsWith(github.head_ref, 'release/') || startsWith(github.head_ref, 'hotfix/'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open the backport PR
+        id: open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.head_ref }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          if [[ ! "$HEAD_REF" =~ ^(release|hotfix)/([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "$HEAD_REF is not release/X.Y.Z or hotfix/X.Y.Z; nothing to backport."
+            exit 0
+          fi
+          version="${BASH_REMATCH[2]}"
+          branch="backport/$version"
+
+          status=$(gh api "repos/$REPO/compare/develop...$SHA" --jq .status)
+          if [[ "$status" == "identical" || "$status" == "behind" ]]; then
+            echo "develop already contains $SHA; nothing to backport."
+            exit 0
+          fi
+
+          if ! gh api "repos/$REPO/git/ref/heads/$branch" --silent 2>/dev/null; then
+            gh api "repos/$REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$SHA" --silent
+          fi
+
+          if [[ -n "$(gh pr list --repo "$REPO" --head "$branch" --base develop --state open --json number --jq '.[].number')" ]]; then
+            echo "A PR from $branch to develop is already open."
+          else
+            gh pr create --repo "$REPO" --base develop --head "$branch" \
+              --title "chore: backport $version to develop" \
+              --body "Brings the changes merged into \`main\` by \`$HEAD_REF\` back to \`develop\`.
+
+          - Merge with a **merge commit** (not squash), so \`main\` and \`develop\` do not diverge.
+          - Resolve conflicts on the \`$branch\` branch.
+          - The CI of PRs opened by GitHub Actions waits for approval; this workflow approves it. If it stays pending, click **Approve and run workflows** on this PR."
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Approve the backport PR CI
+        if: steps.open.outputs.branch != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ steps.open.outputs.branch }}
+        run: |
+          pending_runs() {
+            gh api "repos/$REPO/actions/runs?branch=$BRANCH&event=pull_request" \
+              --jq '.workflow_runs[] | select(.conclusion == "action_required") | .id'
+          }
+
+          approved=0
+          for _ in $(seq 1 12); do
+            sleep 10
+            for id in $(pending_runs); do
+              gh api -X POST "repos/$REPO/actions/runs/$id/approve" --silent
+              echo "Approved run $id."
+              approved=$((approved + 1))
+            done
+            if (( approved > 0 )) && [[ -z "$(pending_runs)" ]]; then
+              exit 0
+            fi
+          done
+          echo "::warning::Could not approve the CI of the backport PR; click Approve and run workflows on it."
+          exit 1

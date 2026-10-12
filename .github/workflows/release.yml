@@ -1,0 +1,22 @@
+# Releases of this repository: tag vX.Y.Z + GitHub Release, move the major tag vX, backport to develop.
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  tag:
+    uses: ./.github/workflows/release-tag.yml
+    with:
+      major-tag: true
+    permissions:
+      contents: write
+
+  backport:
+    uses: ./.github/workflows/backport.yml
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write

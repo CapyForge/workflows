@@ -1,0 +1,59 @@
+name: Release tag
+
+# Reusable, called on pull_request closed into main. When a release/X.Y.Z or hotfix/X.Y.Z PR is merged,
+# tags the merge commit as vX.Y.Z and creates a GitHub Release for it (tracking only; CapyForge does
+# not read it). Tag and Release are each skipped if they already exist (only the first merge counts).
+# With major-tag, also moves vX to the new release (used by this repository's own releases).
+# The caller grants contents: write.
+
+on:
+  workflow_call:
+    inputs:
+      major-tag:
+        description: Also move the major tag vX to this release.
+        type: boolean
+        default: false
+
+jobs:
+  tag:
+    name: tag
+    if: github.event.pull_request.merged && (startsWith(github.head_ref, 'release/') || startsWith(github.head_ref, 'hotfix/'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the tag and the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.head_ref }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MAJOR_TAG: ${{ inputs.major-tag }}
+        run: |
+          if [[ ! "$HEAD_REF" =~ ^(release|hotfix)/(([0-9]+)\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "$HEAD_REF is not release/X.Y.Z or hotfix/X.Y.Z; nothing to tag."
+            exit 0
+          fi
+          tag="v${BASH_REMATCH[2]}"
+          major="v${BASH_REMATCH[3]}"
+
+          if gh api "repos/$REPO/git/ref/tags/$tag" --silent 2>/dev/null; then
+            echo "Tag $tag already exists."
+          else
+            gh api "repos/$REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$SHA" --silent
+            echo "Created tag $tag on $SHA."
+          fi
+
+          if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            echo "GitHub Release $tag already exists."
+          else
+            gh release create "$tag" --repo "$REPO" --verify-tag --title "$tag" --generate-notes
+            echo "Created GitHub Release $tag."
+          fi
+
+          if [[ "$MAJOR_TAG" == "true" ]]; then
+            if gh api "repos/$REPO/git/ref/tags/$major" --silent 2>/dev/null; then
+              gh api -X PATCH "repos/$REPO/git/refs/tags/$major" -f sha="$SHA" -F force=true --silent
+            else
+              gh api "repos/$REPO/git/refs" -f ref="refs/tags/$major" -f sha="$SHA" --silent
+            fi
+            echo "Major tag $major now points to $SHA."
+          fi

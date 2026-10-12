@@ -1,0 +1,27 @@
+# CI of this repository: branch policy and workflow validation.
+name: CI
+
+on:
+  push:
+    branches: [main, develop, 'release/**', 'hotfix/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  source-branch:
+    uses: ./.github/workflows/source-branch.yml
+    permissions:
+      contents: read
+      pull-requests: write
+
+  actionlint:
+    name: actionlint
+    needs: source-branch
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint the workflows
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
